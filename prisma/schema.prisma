@@ -1,0 +1,306 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum ParticipantType {
+  SELF  // adult booked for themselves — participantChildId is null
+  CHILD // guardian booked for a child  — participantChildId is set
+}
+
+enum ActivityCategory {
+  SPORTS
+  ARTS_AND_CRAFTS
+  MUSIC
+  DANCE
+  STEM
+  LANGUAGE
+  TUTORING
+  OUTDOOR
+  SWIMMING
+  MARTIAL_ARTS
+  OTHER
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLIENT SIDE
+// Who buys: adults booking for themselves, or guardians booking for their kids.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// The person who logs in and makes purchases.
+// Has nothing to do with providers or teachers.
+model Client {
+  id        String   @id @default(cuid())
+  auth0Id   String   @unique
+  email     String   @unique
+  firstName String
+  lastName  String
+  phone     String?
+  avatarUrl String?  // S3 URL
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  children Child[]
+  bookings Booking[]
+}
+
+// A child belonging to a Client (guardian).
+// "clientId" used instead of "parentId" — guardian ≠ biological parent.
+model Child {
+  id          String   @id @default(cuid())
+  clientId    String
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  firstName   String
+  lastName    String
+  dateOfBirth DateTime
+  allergies   String?
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  bookings Booking[]
+}
+
+enum StripeAccountStatus {
+  NOT_CONNECTED       // provider hasn't started onboarding
+  ONBOARDING          // OAuth/onboarding link sent, not yet complete
+  PENDING_VERIFICATION // Stripe is reviewing documents
+  ACTIVE              // fully verified, can receive payouts
+  RESTRICTED          // Stripe has placed restrictions (needs action)
+  DISABLED            // account suspended or deauthorised
+}
+
+
+// Who sells: organisations that offer activities, managed by admins, delivered by teachers.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// The organisation (studio, gym, school).
+// Has no Auth0 identity — it is managed by ProviderAdmin users.
+// Connected to the platform via Stripe Connect (Express account).
+model Provider {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  phone       String?
+  website     String?
+  address     String?
+  city        String?
+  province    String?
+  postalCode  String?
+  logoUrl     String?  // S3 URL
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // ── Stripe Connect ─────────────────────────────────────────────────────────
+  // Connected account ID returned by Stripe (e.g. "acct_1Abc…").
+  // Used in every Stripe API call on behalf of this provider.
+  stripeAccountId      String?             @unique
+
+  // Full onboarding lifecycle — drive UI state from this field.
+  stripeAccountStatus  StripeAccountStatus @default(NOT_CONNECTED)
+
+  // Mirrors Stripe's charges_enabled — bookings can only be taken when true.
+  stripeChargesEnabled Boolean             @default(false)
+
+  // Mirrors Stripe's payouts_enabled — provider can receive payouts when true.
+  stripePayoutsEnabled Boolean             @default(false)
+
+  // When the provider completed Stripe onboarding.
+  stripeOnboardedAt    DateTime?
+
+  // Platform revenue share per booking (e.g. 0.10 = 10%).
+  // Stored per-provider so custom rates are possible per deal.
+  platformFeePercent   Decimal             @default(0.10) @db.Decimal(5, 4)
+
+  admins     ProviderAdmin[]
+  teachers   Teacher[]
+  activities Activity[]
+}
+
+// A human who logs in to manage a Provider (update activities, view bookings, etc.).
+// Completely separate auth identity from Client.
+model ProviderAdmin {
+  id         String   @id @default(cuid())
+  auth0Id    String   @unique
+  email      String   @unique
+  firstName  String
+  lastName   String
+  providerId String
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+// A staff member who teaches activities at a Provider.
+// Has their own Auth0 identity and UI — they log in to view their schedule,
+// assigned sessions, and student lists. Completely separate from Client and ProviderAdmin.
+model Teacher {
+  id         String   @id @default(cuid())
+  auth0Id    String?  @unique  // null until the teacher creates their login
+  email      String?  @unique
+  providerId String
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  firstName  String
+  lastName   String
+  phone      String?
+  bio        String?
+  avatarUrl  String?  // S3 URL
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // Many-to-many with Activity
+  activities ActivityTeacher[]
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ACTIVITY DOMAIN
+// What is being sold.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Join table: one activity ↔ many teachers; one teacher ↔ many activities.
+model ActivityTeacher {
+  activityId String
+  teacherId  String
+  activity   Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  teacher    Teacher  @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  @@id([activityId, teacherId])
+}
+
+model Activity {
+  id          String           @id @default(cuid())
+  providerId  String
+  provider    Provider         @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  title       String
+  description String
+  category    ActivityCategory
+  ageMin      Int?             // null = no age restriction
+  ageMax      Int?             // null = no age restriction
+  price       Decimal          @db.Decimal(10, 2)
+  currency    String           @default("CAD")
+  duration    Int              // minutes
+  maxCapacity Int
+  location    String?
+  isOnline    Boolean          @default(false)
+  isActive    Boolean          @default(true)
+  imageUrl    String?          // S3 URL
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  sessions Session[]
+  bookings Booking[]
+  teachers ActivityTeacher[]
+}
+
+// A specific scheduled occurrence of an Activity.
+model Session {
+  id         String   @id @default(cuid())
+  activityId String
+  activity   Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  startTime  DateTime
+  endTime    DateTime
+  capacity   Int
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  bookings Booking[]
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BOOKING DOMAIN
+// The transaction that connects a Client to an Activity/Session.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Two participant patterns:
+//   SELF  → clientId is the participant, participantChildId is null
+//   CHILD → participantChildId points to the child, clientId is just the payer
+model Booking {
+  id         String   @id @default(cuid())
+
+  // The client who pays and owns the booking
+  clientId   String
+  client     Client   @relation(fields: [clientId], references: [id])
+
+  activityId String
+  activity   Activity @relation(fields: [activityId], references: [id])
+
+  sessionId  String?
+  session    Session? @relation(fields: [sessionId], references: [id])
+
+  // Who attends
+  participantType    ParticipantType
+  participantChildId String?
+  participantChild   Child?          @relation(fields: [participantChildId], references: [id])
+
+  status      BookingStatus @default(PENDING)
+  totalAmount Decimal       @db.Decimal(10, 2)
+  currency    String        @default("CAD")
+  notes       String?
+  invoiceUrl  String?       // S3 URL
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  payment Payment?
+}
+
+model Payment {
+  id         String        @id @default(cuid())
+  bookingId  String        @unique
+  booking    Booking       @relation(fields: [bookingId], references: [id])
+
+  // ── Stripe fields ───────────────────────────────────────────────────────────
+  // PaymentIntent on the platform account (e.g. "pi_3Abc…")
+  stripePaymentIntentId  String?  @unique
+
+  // Charge ID for refund references (e.g. "ch_3Abc…")
+  stripeChargeId         String?  @unique
+
+  // Transfer to the provider's connected account (e.g. "tr_3Abc…")
+  stripeTransferId       String?  @unique
+
+  // The gross amount charged to the client
+  amount                 Decimal  @db.Decimal(10, 2)
+
+  // Platform fee withheld before transferring to the provider
+  platformFee            Decimal  @db.Decimal(10, 2) @default(0)
+
+  // Net amount transferred to the provider (amount - platformFee)
+  providerAmount         Decimal  @db.Decimal(10, 2) @default(0)
+
+  currency   String        @default("CAD")
+  status     PaymentStatus @default(PENDING)
+  method     String?       // e.g. card, apple_pay
+  last4      String?       // last 4 digits of card
+  receiptUrl String?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+}
