@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc",
-    "build:prod": "npm run build -w packages/shared && tsc",
+    "build:prod": "prisma generate && tsc",
     "start": "node dist/server.js",
     "start:dev": "NODE_ENV=development nodemon src/server.ts",
     "start:prod": "NODE_ENV=production nodemon src/server.ts",
